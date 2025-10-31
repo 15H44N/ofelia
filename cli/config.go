@@ -20,9 +20,10 @@ const (
 // Config contains the configuration
 type Config struct {
 	Global struct {
-		middlewares.SlackConfig `mapstructure:",squash"`
-		middlewares.SaveConfig  `mapstructure:",squash"`
-		middlewares.MailConfig  `mapstructure:",squash"`
+		middlewares.SlackConfig         `mapstructure:",squash"`
+		middlewares.SaveConfig          `mapstructure:",squash"`
+		middlewares.MailConfig          `mapstructure:",squash"`
+		middlewares.WebhookFileConfig   `mapstructure:",squash"`
 	}
 	ExecJobs    map[string]*ExecJobConfig    `gcfg:"job-exec" mapstructure:"job-exec,squash"`
 	RunJobs     map[string]*RunJobConfig     `gcfg:"job-run" mapstructure:"job-run,squash"`
@@ -129,6 +130,12 @@ func (c *Config) buildSchedulerMiddlewares(sh *core.Scheduler) {
 	sh.Use(middlewares.NewSlack(&c.Global.SlackConfig))
 	sh.Use(middlewares.NewSave(&c.Global.SaveConfig))
 	sh.Use(middlewares.NewMail(&c.Global.MailConfig))
+
+	// Load webhook middlewares from config file
+	webhookMiddlewares := middlewares.LoadWebhookMiddlewares(&c.Global.WebhookFileConfig, c.logger)
+	for _, m := range webhookMiddlewares {
+		sh.Use(m)
+	}
 }
 
 func (c *Config) dockerLabelsUpdate(labels map[string]map[string]string) {

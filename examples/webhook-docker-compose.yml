@@ -1,0 +1,145 @@
+version: '3.8'
+
+# This example demonstrates how to use the webhook middleware
+# with Docker Compose inline configs for notification alerts
+
+configs:
+  ofelia_webhooks:
+    content: |
+      {
+        "webhooks": [
+          {
+            "name": "ntfy-notifications",
+            "priority": 100,
+            "url": "https://ntfy.sh/ofelia-demo",
+            "method": "POST",
+            "headers": {
+              "Title": "Ofelia Job Alert",
+              "Tags": "{{if .Failed}}warning{{else}}white_check_mark{{end}}",
+              "Priority": "{{if .Failed}}high{{else}}default{{end}}"
+            },
+            "body": "Job \"{{.JobName}}\" {{if .Failed}}FAILED{{else}}completed{{end}} in {{.Duration}}\n{{if .Error}}Error: {{.Error}}{{end}}",
+            "onlyOnError": false,
+            "timeout": 10,
+            "retry": {
+              "count": 3,
+              "backoff": "1s"
+            }
+          },
+          {
+            "name": "discord-webhook",
+            "priority": 200,
+            "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+            "method": "POST",
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "username": "Ofelia",
+              "content": "Job **{{.JobName}}** {{if .Failed}}:x: failed{{else}}:white_check_mark: succeeded{{end}}",
+              "embeds": [{
+                "title": "Execution Details",
+                "color": "{{if .Failed}}15158332{{else}}3066993{{end}}",
+                "fields": [
+                  {
+                    "name": "Duration",
+                    "value": "{{.Duration}}",
+                    "inline": true
+                  },
+                  {
+                    "name": "Command",
+                    "value": "`{{.JobCommand}}`",
+                    "inline": false
+                  },
+                  {
+                    "name": "Host",
+                    "value": "{{.Hostname}}",
+                    "inline": true
+                  },
+                  {
+                    "name": "Timestamp",
+                    "value": "{{.Timestamp}}",
+                    "inline": true
+                  }
+                ],
+                "footer": {
+                  "text": "Execution ID: {{.ExecutionID}}"
+                }
+              }]
+            },
+            "onlyOnError": false,
+            "timeout": 10
+          }
+        ]
+      }
+
+  ofelia_config:
+    content: |
+      [global]
+      webhook-config-file = /config/webhooks.json
+
+services:
+  # Ofelia scheduler with webhook notifications
+  ofelia:
+    image: mcuadros/ofelia:latest
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    configs:
+      - source: ofelia_webhooks
+        target: /config/webhooks.json
+      - source: ofelia_config
+        target: /etc/ofelia/config.ini
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  # Example application with job labels
+  app:
+    image: alpine:3.22
+    command: sh -c "while true; do sleep 60; done"
+    labels:
+      # Enable Ofelia for this container
+      ofelia.enabled: "true"
+
+      # Example 1: Simple recurring job
+      ofelia.job-exec.health-check.schedule: "@every 5m"
+      ofelia.job-exec.health-check.command: "sh -c 'echo Health check passed at $(date)'"
+
+      # Example 2: Backup job that might fail
+      ofelia.job-exec.backup.schedule: "0 2 * * *"  # Daily at 2 AM
+      ofelia.job-exec.backup.command: "sh -c 'echo Starting backup...; sleep 5; echo Backup completed'"
+
+      # Example 3: Monitoring job with potential failure
+      ofelia.job-exec.disk-check.schedule: "@every 1h"
+      ofelia.job-exec.disk-check.command: "sh -c 'df -h / | tail -n 1 | awk \"{ print \\$5 }\"'"
+
+  # Example: ntfy test endpoint (optional, for local testing)
+  # Uncomment to run a local ntfy server
+  # ntfy:
+  #   image: binwiederhier/ntfy
+  #   command: serve
+  #   ports:
+  #     - "8080:80"
+  #   environment:
+  #     - NTFY_BASE_URL=http://localhost:8080
+
+# To test this setup:
+# 1. Replace the Discord webhook URL with your own
+# 2. Or use the ntfy.sh public endpoint (as shown)
+# 3. Run: docker compose -f webhook-docker-compose.yml up
+# 4. Subscribe to https://ntfy.sh/ofelia-demo on your phone/browser
+# 5. Watch the webhook notifications arrive!
+
+# Advanced: Custom webhook for internal monitoring
+# You can add more webhooks to the config by extending the webhooks array
+# Each webhook can have:
+# - name: Identifier for logging
+# - priority: Lower numbers run first (default: 0)
+# - url: HTTP endpoint (supports templates)
+# - method: HTTP method (default: POST)
+# - headers: Custom headers (supports templates)
+# - body: String or JSON object (supports templates)
+# - onlyOnError: Send webhook only on job failure (default: false)
+# - timeout: HTTP request timeout in seconds (default: 10)
+# - retry: Retry configuration with count and backoff

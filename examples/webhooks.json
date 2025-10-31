@@ -1,0 +1,199 @@
+{
+  "webhooks": [
+    {
+      "name": "ntfy-push-notifications",
+      "priority": 100,
+      "url": "https://ntfy.sh/YOUR-TOPIC-NAME",
+      "method": "POST",
+      "headers": {
+        "Title": "Ofelia Job Alert",
+        "Tags": "{{if .Failed}}warning,x{{else}}white_check_mark{{end}}",
+        "Priority": "{{if .Failed}}high{{else}}default{{end}}",
+        "Click": "https://monitoring.example.com/jobs/{{.JobName}}"
+      },
+      "body": "Job \"{{.JobName}}\" {{if .Failed}}FAILED{{else}}completed successfully{{end}} in {{.Duration}}\n\n{{if .Error}}❌ Error: {{.Error}}\n\n{{end}}Host: {{.Hostname}}\nCommand: {{.JobCommand}}\nSchedule: {{.JobSchedule}}",
+      "onlyOnError": false,
+      "timeout": 10,
+      "retry": {
+        "count": 3,
+        "backoff": "1s"
+      }
+    },
+    {
+      "name": "discord-notifications",
+      "priority": 200,
+      "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "username": "Ofelia Bot",
+        "avatar_url": "https://raw.githubusercontent.com/mcuadros/ofelia/master/static/avatar.png",
+        "content": "{{if .Failed}}@here {{end}}Job **{{.JobName}}** {{if .Failed}}:x: failed{{else}}:white_check_mark: succeeded{{end}}",
+        "embeds": [
+          {
+            "title": "Job Execution Report",
+            "color": "{{if .Failed}}15158332{{else if .Skipped}}16753920{{else}}3066993{{end}}",
+            "fields": [
+              {
+                "name": "Job Name",
+                "value": "{{.JobName}}",
+                "inline": true
+              },
+              {
+                "name": "Status",
+                "value": "{{if .Failed}}Failed{{else if .Skipped}}Skipped{{else}}Success{{end}}",
+                "inline": true
+              },
+              {
+                "name": "Duration",
+                "value": "{{.Duration}}",
+                "inline": true
+              },
+              {
+                "name": "Command",
+                "value": "`{{.JobCommand | truncate 100}}`",
+                "inline": false
+              },
+              {
+                "name": "Host",
+                "value": "{{.Hostname}}",
+                "inline": true
+              },
+              {
+                "name": "Schedule",
+                "value": "`{{.JobSchedule}}`",
+                "inline": true
+              }
+            ],
+            "footer": {
+              "text": "Execution ID: {{.ExecutionID}}"
+            },
+            "timestamp": "{{.Timestamp}}"
+          }
+        ]
+      },
+      "onlyOnError": false,
+      "timeout": 10
+    },
+    {
+      "name": "slack-notifications",
+      "priority": 300,
+      "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "text": "Job *{{.JobName}}* {{if .Failed}}failed{{else}}completed{{end}} in {{.Duration}}",
+        "attachments": [
+          {
+            "color": "{{if .Failed}}danger{{else if .Skipped}}warning{{else}}good{{end}}",
+            "fields": [
+              {
+                "title": "Command",
+                "value": "{{.JobCommand}}",
+                "short": false
+              },
+              {
+                "title": "Host",
+                "value": "{{.Hostname}}",
+                "short": true
+              },
+              {
+                "title": "Duration",
+                "value": "{{.Duration}}",
+                "short": true
+              }
+            ],
+            "footer": "Ofelia Scheduler",
+            "ts": "{{unixTime .StartTime}}"
+          }
+        ]
+      },
+      "onlyOnError": false,
+      "timeout": 10
+    },
+    {
+      "name": "telegram-bot",
+      "priority": 400,
+      "url": "https://api.telegram.org/bot{{env \"TELEGRAM_BOT_TOKEN\"}}/sendMessage",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "chat_id": "YOUR_CHAT_ID",
+        "text": "{{if .Failed}}❌{{else}}✅{{end}} *Job: {{.JobName}}*\n\n*Status:* {{if .Failed}}Failed{{else}}Success{{end}}\n*Duration:* {{.Duration}}\n*Host:* {{.Hostname}}\n*Command:* `{{.JobCommand}}`\n{{if .Error}}\n*Error:* {{.Error}}{{end}}\n\n_Execution ID: {{.ExecutionID}}_",
+        "parse_mode": "Markdown"
+      },
+      "onlyOnError": false,
+      "timeout": 10
+    },
+    {
+      "name": "healthchecks-io",
+      "priority": 500,
+      "url": "https://hc-ping.com/YOUR-UUID-HERE{{if .Failed}}/fail{{end}}",
+      "method": "POST",
+      "body": "{{.Stdout}}",
+      "onlyOnError": false,
+      "timeout": 10
+    },
+    {
+      "name": "custom-monitoring-api",
+      "priority": 600,
+      "url": "https://monitoring.example.com/api/job-events",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer YOUR_API_TOKEN"
+      },
+      "body": {
+        "source": "ofelia",
+        "hostname": "{{.Hostname}}",
+        "job": {
+          "name": "{{.JobName}}",
+          "schedule": "{{.JobSchedule}}",
+          "command": "{{.JobCommand}}"
+        },
+        "execution": {
+          "id": "{{.ExecutionID}}",
+          "start_time": "{{.Timestamp}}",
+          "duration_seconds": "{{.Duration.Seconds}}",
+          "status": "{{if .Failed}}failed{{else if .Skipped}}skipped{{else}}success{{end}}",
+          "failed": "{{.Failed}}",
+          "skipped": "{{.Skipped}}"
+        },
+        "error": "{{.Error | default \"\"}}",
+        "logs": {
+          "stdout": "{{.Stdout | truncate 1000}}",
+          "stderr": "{{.Stderr | truncate 1000}}"
+        }
+      },
+      "onlyOnError": false,
+      "timeout": 15,
+      "retry": {
+        "count": 5,
+        "backoff": "2s"
+      }
+    },
+    {
+      "name": "error-only-webhook",
+      "priority": 1000,
+      "url": "https://errors.example.com/webhook",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "job": "{{.JobName}}",
+        "error": "{{.Error}}",
+        "stderr": "{{.Stderr}}",
+        "timestamp": "{{.Timestamp}}"
+      },
+      "onlyOnError": true,
+      "timeout": 10
+    }
+  ]
+}
