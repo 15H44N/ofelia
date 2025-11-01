@@ -30,9 +30,10 @@ type Config struct {
 	ServiceJobs map[string]*RunServiceConfig `gcfg:"job-service-run" mapstructure:"job-service-run,squash"`
 	LocalJobs   map[string]*LocalJobConfig   `gcfg:"job-local" mapstructure:"job-local,squash"`
 
-	sh            *core.Scheduler
-	dockerHandler *DockerHandler
-	logger        core.Logger
+	sh              *core.Scheduler
+	dockerHandler   *DockerHandler
+	logger          core.Logger
+	webhookRegistry *middlewares.WebhookRegistry
 }
 
 func NewConfig(logger core.Logger) *Config {
@@ -92,7 +93,11 @@ func (c *Config) InitializeApp() error {
 		defaults.SetDefaults(j)
 		j.Client = c.dockerHandler.GetInternalDockerClient()
 		j.Name = name
-		j.buildMiddlewares()
+		j.webhookRegistry = c.webhookRegistry
+		j.logger = c.logger
+		if err := j.buildMiddlewares(); err != nil {
+			return err
+		}
 		c.sh.AddJob(j)
 	}
 
@@ -100,14 +105,22 @@ func (c *Config) InitializeApp() error {
 		defaults.SetDefaults(j)
 		j.Client = c.dockerHandler.GetInternalDockerClient()
 		j.Name = name
-		j.buildMiddlewares()
+		j.webhookRegistry = c.webhookRegistry
+		j.logger = c.logger
+		if err := j.buildMiddlewares(); err != nil {
+			return err
+		}
 		c.sh.AddJob(j)
 	}
 
 	for name, j := range c.LocalJobs {
 		defaults.SetDefaults(j)
 		j.Name = name
-		j.buildMiddlewares()
+		j.webhookRegistry = c.webhookRegistry
+		j.logger = c.logger
+		if err := j.buildMiddlewares(); err != nil {
+			return err
+		}
 		c.sh.AddJob(j)
 	}
 
@@ -115,7 +128,11 @@ func (c *Config) InitializeApp() error {
 		defaults.SetDefaults(j)
 		j.Name = name
 		j.Client = c.dockerHandler.GetInternalDockerClient()
-		j.buildMiddlewares()
+		j.webhookRegistry = c.webhookRegistry
+		j.logger = c.logger
+		if err := j.buildMiddlewares(); err != nil {
+			return err
+		}
 		c.sh.AddJob(j)
 	}
 
@@ -131,8 +148,9 @@ func (c *Config) buildSchedulerMiddlewares(sh *core.Scheduler) {
 	sh.Use(middlewares.NewSave(&c.Global.SaveConfig))
 	sh.Use(middlewares.NewMail(&c.Global.MailConfig))
 
-	// Load webhook middlewares from config file
-	webhookMiddlewares := middlewares.LoadWebhookMiddlewares(&c.Global.WebhookFileConfig, c.logger)
+	// Load webhook middlewares from config file and store registry
+	webhookMiddlewares, registry := middlewares.LoadWebhookMiddlewares(&c.Global.WebhookFileConfig, c.logger)
+	c.webhookRegistry = registry
 	for _, m := range webhookMiddlewares {
 		sh.Use(m)
 	}
@@ -161,7 +179,12 @@ func (c *Config) dockerLabelsUpdate(labels map[string]map[string]string) {
 					// Remove from the scheduler
 					c.sh.RemoveJob(j)
 					// Add the job back to the scheduler
-					newJob.buildMiddlewares()
+					newJob.webhookRegistry = c.webhookRegistry
+					newJob.logger = c.logger
+					if err := newJob.buildMiddlewares(); err != nil {
+						c.logger.Errorf("Failed to build middlewares for job %s: %v", name, err)
+						continue
+					}
 					c.sh.AddJob(newJob)
 					// Update the job config
 					c.ExecJobs[name] = newJob
@@ -190,7 +213,12 @@ func (c *Config) dockerLabelsUpdate(labels map[string]map[string]string) {
 			defaults.SetDefaults(newJob)
 			newJob.Client = c.dockerHandler.GetInternalDockerClient()
 			newJob.Name = newJobsName
-			newJob.buildMiddlewares()
+			newJob.webhookRegistry = c.webhookRegistry
+			newJob.logger = c.logger
+			if err := newJob.buildMiddlewares(); err != nil {
+				c.logger.Errorf("Failed to build middlewares for job %s: %v", newJobsName, err)
+				continue
+			}
 			c.sh.AddJob(newJob)
 			c.ExecJobs[newJobsName] = newJob
 		}
@@ -212,7 +240,12 @@ func (c *Config) dockerLabelsUpdate(labels map[string]map[string]string) {
 					// Remove from the scheduler
 					c.sh.RemoveJob(j)
 					// Add the job back to the scheduler
-					newJob.buildMiddlewares()
+					newJob.webhookRegistry = c.webhookRegistry
+					newJob.logger = c.logger
+					if err := newJob.buildMiddlewares(); err != nil {
+						c.logger.Errorf("Failed to build middlewares for job %s: %v", name, err)
+						continue
+					}
 					c.sh.AddJob(newJob)
 					// Update the job config
 					c.RunJobs[name] = newJob
@@ -240,7 +273,12 @@ func (c *Config) dockerLabelsUpdate(labels map[string]map[string]string) {
 			defaults.SetDefaults(newJob)
 			newJob.Client = c.dockerHandler.GetInternalDockerClient()
 			newJob.Name = newJobsName
-			newJob.buildMiddlewares()
+			newJob.webhookRegistry = c.webhookRegistry
+			newJob.logger = c.logger
+			if err := newJob.buildMiddlewares(); err != nil {
+				c.logger.Errorf("Failed to build middlewares for job %s: %v", newJobsName, err)
+				continue
+			}
 			c.sh.AddJob(newJob)
 			c.RunJobs[newJobsName] = newJob
 		}
@@ -254,13 +292,35 @@ type ExecJobConfig struct {
 	middlewares.SlackConfig   `mapstructure:",squash"`
 	middlewares.SaveConfig    `mapstructure:",squash"`
 	middlewares.MailConfig    `mapstructure:",squash"`
+	middlewares.WebhookConfig `mapstructure:",squash"`
+
+	// Internal fields for webhook support
+	webhookRegistry *middlewares.WebhookRegistry
+	logger          core.Logger
 }
 
-func (c *ExecJobConfig) buildMiddlewares() {
+// buildWebhookMiddleware is a helper to build per-job webhook middleware
+func buildWebhookMiddleware(config *middlewares.WebhookConfig, registry *middlewares.WebhookRegistry, logger core.Logger, jobName string, use func(...core.Middleware)) error {
+	if registry == nil {
+		return nil
+	}
+
+	webhookMiddleware, err := middlewares.NewWebhookFromConfig(config, registry, logger)
+	if err != nil {
+		return fmt.Errorf("failed to create webhook middleware for job %s: %w", jobName, err)
+	}
+	if webhookMiddleware != nil {
+		use(webhookMiddleware)
+	}
+	return nil
+}
+
+func (c *ExecJobConfig) buildMiddlewares() error {
 	c.ExecJob.Use(middlewares.NewOverlap(&c.OverlapConfig))
 	c.ExecJob.Use(middlewares.NewSlack(&c.SlackConfig))
 	c.ExecJob.Use(middlewares.NewSave(&c.SaveConfig))
 	c.ExecJob.Use(middlewares.NewMail(&c.MailConfig))
+	return buildWebhookMiddleware(&c.WebhookConfig, c.webhookRegistry, c.logger, c.Name, c.ExecJob.Use)
 }
 
 // RunServiceConfig contains all configuration params needed to build a RunJob
@@ -270,6 +330,11 @@ type RunServiceConfig struct {
 	middlewares.SlackConfig   `mapstructure:",squash"`
 	middlewares.SaveConfig    `mapstructure:",squash"`
 	middlewares.MailConfig    `mapstructure:",squash"`
+	middlewares.WebhookConfig `mapstructure:",squash"`
+
+	// Internal fields for webhook support
+	webhookRegistry *middlewares.WebhookRegistry
+	logger          core.Logger
 }
 
 type RunJobConfig struct {
@@ -278,13 +343,19 @@ type RunJobConfig struct {
 	middlewares.SlackConfig   `mapstructure:",squash"`
 	middlewares.SaveConfig    `mapstructure:",squash"`
 	middlewares.MailConfig    `mapstructure:",squash"`
+	middlewares.WebhookConfig `mapstructure:",squash"`
+
+	// Internal fields for webhook support
+	webhookRegistry *middlewares.WebhookRegistry
+	logger          core.Logger
 }
 
-func (c *RunJobConfig) buildMiddlewares() {
+func (c *RunJobConfig) buildMiddlewares() error {
 	c.RunJob.Use(middlewares.NewOverlap(&c.OverlapConfig))
 	c.RunJob.Use(middlewares.NewSlack(&c.SlackConfig))
 	c.RunJob.Use(middlewares.NewSave(&c.SaveConfig))
 	c.RunJob.Use(middlewares.NewMail(&c.MailConfig))
+	return buildWebhookMiddleware(&c.WebhookConfig, c.webhookRegistry, c.logger, c.Name, c.RunJob.Use)
 }
 
 // LocalJobConfig contains all configuration params needed to build a RunJob
@@ -294,18 +365,25 @@ type LocalJobConfig struct {
 	middlewares.SlackConfig   `mapstructure:",squash"`
 	middlewares.SaveConfig    `mapstructure:",squash"`
 	middlewares.MailConfig    `mapstructure:",squash"`
+	middlewares.WebhookConfig `mapstructure:",squash"`
+
+	// Internal fields for webhook support
+	webhookRegistry *middlewares.WebhookRegistry
+	logger          core.Logger
 }
 
-func (c *LocalJobConfig) buildMiddlewares() {
+func (c *LocalJobConfig) buildMiddlewares() error {
 	c.LocalJob.Use(middlewares.NewOverlap(&c.OverlapConfig))
 	c.LocalJob.Use(middlewares.NewSlack(&c.SlackConfig))
 	c.LocalJob.Use(middlewares.NewSave(&c.SaveConfig))
 	c.LocalJob.Use(middlewares.NewMail(&c.MailConfig))
+	return buildWebhookMiddleware(&c.WebhookConfig, c.webhookRegistry, c.logger, c.Name, c.LocalJob.Use)
 }
 
-func (c *RunServiceConfig) buildMiddlewares() {
+func (c *RunServiceConfig) buildMiddlewares() error {
 	c.RunServiceJob.Use(middlewares.NewOverlap(&c.OverlapConfig))
 	c.RunServiceJob.Use(middlewares.NewSlack(&c.SlackConfig))
 	c.RunServiceJob.Use(middlewares.NewSave(&c.SaveConfig))
 	c.RunServiceJob.Use(middlewares.NewMail(&c.MailConfig))
+	return buildWebhookMiddleware(&c.WebhookConfig, c.webhookRegistry, c.logger, c.Name, c.RunServiceJob.Use)
 }

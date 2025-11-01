@@ -12,14 +12,16 @@ import (
 
 // Webhook middleware sends HTTP requests to configured webhooks after job execution
 type Webhook struct {
-	name        string
-	url         string
-	method      string
-	headers     map[string]string
-	body        interface{}
-	onlyOnError bool
-	timeout     time.Duration
-	retryCount  int
+	name         string
+	webhookType  string // "error" | "info" | "all"
+	active       bool
+	url          string
+	method       string
+	headers      map[string]string
+	body         interface{}
+	onlyOnError  bool
+	timeout      time.Duration
+	retryCount   int
 	retryBackoff time.Duration
 
 	logger core.Logger
@@ -47,6 +49,8 @@ func NewWebhookFromDefinition(def WebhookDefinition, logger core.Logger) (core.M
 
 	webhook := &Webhook{
 		name:         def.Name,
+		webhookType:  def.Type,
+		active:       def.Active,
 		url:          def.URL,
 		method:       def.Method,
 		headers:      def.Headers,
@@ -75,13 +79,36 @@ func (w *Webhook) Run(ctx *core.Context) error {
 	err := ctx.Next()
 	ctx.Stop(err)
 
-	// Determine if we should send the webhook
-	shouldSend := !w.onlyOnError || ctx.Execution.Failed
-
-	if shouldSend {
-		// Send webhook asynchronously to avoid blocking
-		go w.sendWebhook(ctx)
+	// Check if webhook is active
+	if !w.active {
+		ctx.Logger.Debugf("Webhook %q skipped (inactive)", w.name)
+		return err
 	}
+
+	// Check if webhook type matches job result
+	shouldSend := false
+	if w.webhookType == WebhookTypeAll {
+		shouldSend = true
+	} else if ctx.Execution.Failed && w.webhookType == WebhookTypeError {
+		shouldSend = true
+	} else if !ctx.Execution.Failed && w.webhookType == WebhookTypeInfo {
+		shouldSend = true
+	}
+
+	if !shouldSend {
+		ctx.Logger.Debugf("Webhook %q skipped (type mismatch: webhook type=%s, job failed=%t)",
+			w.name, w.webhookType, ctx.Execution.Failed)
+		return err
+	}
+
+	// Also check the legacy onlyOnError flag for backward compatibility
+	if w.onlyOnError && !ctx.Execution.Failed {
+		ctx.Logger.Debugf("Webhook %q skipped (onlyOnError=true but job succeeded)", w.name)
+		return err
+	}
+
+	// Send webhook asynchronously to avoid blocking
+	go w.sendWebhook(ctx)
 
 	return err
 }
